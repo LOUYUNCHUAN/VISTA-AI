@@ -26,25 +26,26 @@ def load_data(data_dir):
         'bullying': 1
     }
     
-    for filename in os.listdir(data_dir):
-        if not filename.endswith('.wav'):
-            continue
-            
-        file_path = os.path.join(data_dir, filename)
-        
-        # Extract label from filename
-        category = None
-        for k in label_map.keys():
-            if filename.startswith(k):
-                category = k
-                break
+    for root, _, files in os.walk(data_dir):
+        for filename in files:
+            if not filename.endswith('.wav'):
+                continue
                 
-        if category:
-            feat = extract_features(file_path)
-            if feat is not None:
-                features.append(feat)
-                labels.append(label_map[category])
-                filenames_list.append(filename)
+            file_path = os.path.join(root, filename)
+        
+            # Extract label from filename
+            category = None
+            for k in label_map.keys():
+                if filename.startswith(k):
+                    category = k
+                    break
+                    
+            if category:
+                feat = extract_features(file_path)
+                if feat is not None:
+                    features.append(feat)
+                    labels.append(label_map[category])
+                    filenames_list.append(filename)
                 
     return np.array(features), np.array(labels), label_map, filenames_list
 

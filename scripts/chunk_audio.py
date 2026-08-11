@@ -89,10 +89,18 @@ if __name__ == "__main__":
     
     print("\n[Category: Bullying]")
     bull_dir = os.path.join(project_root, "data", "audio", "bull")
-    process_category(bull_dir, train_out, test_out, "bullying", args.test_size, args.chunk_duration, args.overlap_duration)
+    bull_train_out = os.path.join(train_out, "bull")
+    bull_test_out = os.path.join(test_out, "bull")
+    os.makedirs(bull_train_out, exist_ok=True)
+    os.makedirs(bull_test_out, exist_ok=True)
+    process_category(bull_dir, bull_train_out, bull_test_out, "bullying", args.test_size, args.chunk_duration, args.overlap_duration)
     
     print("\n[Category: Not Bullying]")
     notbully_dir = os.path.join(project_root, "data", "audio", "notbully")
-    process_category(notbully_dir, train_out, test_out, "not_bullying", args.test_size, args.chunk_duration, args.overlap_duration)
+    notbully_train_out = os.path.join(train_out, "notbully")
+    notbully_test_out = os.path.join(test_out, "notbully")
+    os.makedirs(notbully_train_out, exist_ok=True)
+    os.makedirs(notbully_test_out, exist_ok=True)
+    process_category(notbully_dir, notbully_train_out, notbully_test_out, "not_bullying", args.test_size, args.chunk_duration, args.overlap_duration)
     
     print("\n✅ All chunking and splitting complete!")

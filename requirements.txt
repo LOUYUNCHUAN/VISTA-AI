@@ -13,3 +13,5 @@ huggingface_hub
 python-dotenv
 yt-dlp
 elevenlabs
+openai-whisper
+google-generativeai
