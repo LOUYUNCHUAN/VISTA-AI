@@ -46,7 +46,8 @@ def upload_dataset():
         repo_id=repo_id,
         repo_type="dataset",
         revision=branch_name,
-        commit_message=f"Dataset backup for {branch_name}"
+        commit_message=f"Dataset backup for {branch_name}",
+        ignore_patterns=["chunks/*", "**/.DS_Store"]
     )
     print("Upload complete! ✅")
 
@@ -91,7 +92,8 @@ def download_dataset():
         repo_type="dataset",
         revision=latest_branch,
         local_dir=data_dir,
-        token=os.getenv("hugging_face_api_token")
+        token=os.getenv("hugging_face_api_token"),
+        ignore_patterns=["chunks/*", "**/.DS_Store"]
     )
     print("Download complete! ✅")
 

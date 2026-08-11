@@ -52,8 +52,8 @@ def main():
     args = parser.parse_args()
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    train_dir = os.path.join(project_root, 'data', 'chunks', 'train')
-    test_dir = os.path.join(project_root, 'data', 'chunks', 'test')
+    bull_dir = os.path.join(project_root, 'data', 'audio', 'bull')
+    notbully_dir = os.path.join(project_root, 'data', 'audio', 'notbully')
     
     print(f"Loading Whisper model '{args.model}' (this may take a moment to download on first run)...")
     model = whisper.load_model(args.model)
@@ -61,8 +61,8 @@ def main():
 
     transcripts = {}
     
-    transcribe_directory(model, train_dir, transcripts)
-    transcribe_directory(model, test_dir, transcripts)
+    transcribe_directory(model, bull_dir, transcripts)
+    transcribe_directory(model, notbully_dir, transcripts)
 
     # Save to JSON
     data_dir = os.path.join(project_root, 'data')

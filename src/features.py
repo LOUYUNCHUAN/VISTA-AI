@@ -13,6 +13,16 @@ def extract_features(file_path):
     try:
         # Load audio (mono, 22050 Hz)
         y, sr = librosa.load(file_path, sr=22050)
+        return extract_features_from_array(y, sr)
+    except Exception as e:
+        print(f"Error loading {file_path}: {e}")
+        return None
+
+def extract_features_from_array(y, sr):
+    """
+    Extracts acoustic features from a loaded librosa audio array.
+    """
+    try:
         
         # Pad signal if it's too short for standard n_fft=2048 windows
         if len(y) < 2048:
@@ -82,5 +92,5 @@ def extract_features(file_path):
         
         return features
     except Exception as e:
-        print(f"Error extracting features from {file_path}: {e}")
+        print(f"Error extracting features from array: {e}")
         return None

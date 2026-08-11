@@ -10,8 +10,27 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
+import re
+
 # We can reuse load_data to get the original filenames and labels
 from src.train import load_data
+
+def get_original_filename(chunk_filename):
+    """
+    Extracts the original raw video/audio filename from a chunk filename.
+    e.g. 'bullying_fight1_chunk000.wav' -> 'fight1.wav'
+    """
+    if chunk_filename.startswith("bullying_"):
+        base = chunk_filename[len("bullying_"):]
+    elif chunk_filename.startswith("not_bullying_"):
+        base = chunk_filename[len("not_bullying_"):]
+    else:
+        base = chunk_filename
+        
+    match = re.search(r"^(.*)_chunk\d+\.wav$", base)
+    if match:
+        return match.group(1) + ".wav"
+    return chunk_filename
 
 def get_audio_probabilities(svm_pipeline, X):
     """
@@ -53,8 +72,9 @@ def build_fusion_dataset(X, y, filenames, svm_pipeline, nlp_preds, label_map):
         
         # Get NLP probability (default to 0.0 if not found)
         nlp_p = 0.0
-        if filename in nlp_preds:
-            nlp_p = nlp_preds[filename].get("probability", 0.0)
+        orig_name = get_original_filename(filename)
+        if orig_name in nlp_preds:
+            nlp_p = nlp_preds[orig_name].get("probability", 0.0)
             
         X_fusion.append([audio_p, nlp_p])
         y_fusion.append(y[i])
@@ -126,7 +146,8 @@ def main():
         audio_p = X_fusion_test[i][0]
         text_p = X_fusion_test[i][1]
         filename = test_filenames[i]
-        recognised_text = transcripts_dict.get(filename, "N/A")
+        orig_name = get_original_filename(filename)
+        recognised_text = transcripts_dict.get(orig_name, "N/A")
         
         status = "❌ MISCLASSIFIED" if y_test[i] != y_pred[i] else "✅ CORRECT"
         if y_test[i] != y_pred[i]:

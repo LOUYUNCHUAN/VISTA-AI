@@ -34,7 +34,15 @@ def classify_text(model, transcript):
     """
 
     try:
-        response = model.generate_content(prompt)
+        from google.generativeai.types import HarmCategory, HarmBlockThreshold
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+        
+        response = model.generate_content(prompt, safety_settings=safety_settings)
         text = response.text.strip()
         
         # Clean up markdown if Gemini wrapped it in ```json ... ```
@@ -65,7 +73,7 @@ def main():
     genai.configure(api_key=api_key)
     
     # We use Flash because it is insanely fast and cheap, perfectly suited for this
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-3.6-flash')
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     transcripts_path = os.path.join(project_root, 'data', 'transcripts.json')
