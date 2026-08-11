@@ -1,0 +1,15 @@
+numpy
+pandas
+librosa
+scikit-learn
+streamlit
+matplotlib
+seaborn
+soundfile
+joblib
+requests
+tqdm
+huggingface_hub
+python-dotenv
+yt-dlp
+elevenlabs
