@@ -14,12 +14,14 @@ try:
 except ImportError:
     pass
 
+try:
+    from transformers import pipeline
+except ImportError:
+    pass
+
 import whisper
-import google.generativeai as genai
-from dotenv import load_dotenv
 from src.inference import run_asymmetric_inference
 
-load_dotenv()
 
 st.set_page_config(page_title="VISTA-AI Asymmetric Inference", layout="wide")
 
@@ -50,15 +52,15 @@ def load_models():
     try: whisper_model = whisper.load_model("base")
     except: pass
         
-    gemini_model = None
-    api_key = os.getenv("GEMINI_API_KEY")
-    if api_key:
-        genai.configure(api_key=api_key)
-        gemini_model = genai.GenerativeModel('gemini-3.6-flash')
+    nlp_classifier = None
+    try:
+        nlp_classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
+    except Exception as e:
+        print(f"Failed to load transformer: {e}")
         
-    return svm_pipeline, fusion_model, whisper_model, gemini_model
+    return svm_pipeline, fusion_model, whisper_model, nlp_classifier
 
-svm_pipeline, fusion_model, whisper_model, gemini_model = load_models()
+svm_pipeline, fusion_model, whisper_model, nlp_classifier = load_models()
 
 tab1, tab2 = st.tabs(["Live Test / Upload", "Model Benchmarking"])
 
@@ -95,7 +97,7 @@ with tab1:
                     svm_pipeline=svm_pipeline,
                     fusion_model=fusion_model,
                     whisper_model=whisper_model,
-                    gemini_model=gemini_model,
+                    nlp_classifier=nlp_classifier,
                     chunk_duration=15,
                     overlap=5
                 )

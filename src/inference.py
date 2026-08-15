@@ -4,7 +4,7 @@ import librosa
 import numpy as np
 from src.features import extract_features_from_array
 
-def run_asymmetric_inference(audio_path, svm_pipeline, fusion_model, whisper_model, gemini_model, chunk_duration=15, overlap=5):
+def run_asymmetric_inference(audio_path, svm_pipeline, fusion_model, whisper_model, nlp_classifier, chunk_duration=15, overlap=5):
     """
     Runs the Asymmetric Inference Engine on a long audio file.
     - Model 2 (NLP) gets the FULL uncut audio context.
@@ -20,7 +20,7 @@ def run_asymmetric_inference(audio_path, svm_pipeline, fusion_model, whisper_mod
     # ---------------------------------------------------------
     # 1. SEMANTIC PIPELINE (FULL CONTEXT)
     # ---------------------------------------------------------
-    if whisper_model and gemini_model:
+    if whisper_model and nlp_classifier:
         try:
             print("Transcribing full audio with Whisper...")
             res = whisper_model.transcribe(audio_path, fp16=False)
@@ -28,25 +28,12 @@ def run_asymmetric_inference(audio_path, svm_pipeline, fusion_model, whisper_mod
             results["transcript"] = transcript_text
             
             if transcript_text:
-                print("Analyzing full context with Gemini...")
-                prompt = f"""
-                Analyze if this entire conversation indicates bullying, violence, harassment, or aggression.
-                Transcript: "{transcript_text}"
-                Output strictly JSON: {{"prediction": 1 or 0, "probability": float between 0.0 and 1.0}}
-                """
-                from google.generativeai.types import HarmCategory, HarmBlockThreshold
-                safety_settings = {
-                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-                }
-                
-                response = gemini_model.generate_content(prompt, safety_settings=safety_settings).text.strip()
-                if response.startswith("```json"): response = response[7:]
-                if response.endswith("```"): response = response[:-3]
-                j = json.loads(response.strip())
-                results["global_text_prob"] = float(j.get("probability", 0.0))
+                print("Analyzing full context with local Transformer...")
+                labels = ["aggressive bullying and targeted harassment", "friends joking around and casual conversation"]
+                res = nlp_classifier(transcript_text, candidate_labels=labels)
+                bully_idx = res["labels"].index("aggressive bullying and targeted harassment")
+                prob = res["scores"][bully_idx]
+                results["global_text_prob"] = float(prob)
         except Exception as e:
             print(f"Error in Semantic Pipeline: {e}")
 

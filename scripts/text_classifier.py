@@ -1,80 +1,38 @@
 import os
 import json
 import argparse
-import time
-from dotenv import load_dotenv
+import sys
+from tqdm import tqdm
 
 try:
-    import google.generativeai as genai
+    from transformers import pipeline
 except ImportError:
-    print("Error: google-generativeai is not installed. Please run: pip install google-generativeai python-dotenv")
-    import sys
+    print("Error: transformers is not installed. Please run: pip install transformers torch")
     sys.exit(1)
 
-# Load environment variables
-load_dotenv()
-
-def classify_text(model, transcript):
-    """
-    Sends the transcript to Gemini and forces it to return JSON
-    containing a binary decision and a probability score.
-    """
+def classify_text(classifier, transcript):
     if not transcript or len(transcript.strip()) < 2:
-        return {"prediction": 0, "probability": 0.0} # Not enough text to classify
-
-    prompt = f"""
-    You are an expert toxicity and conflict analyzer. 
-    Analyze the following transcribed speech and determine if it indicates bullying, harassment, violence, fighting, or aggressive targeted insults.
-    
-    Transcription: "{transcript}"
-    
-    Respond ONLY in valid JSON format with exactly two fields:
-    - "prediction": 1 if it is bullying/conflict, 0 if it is normal/safe.
-    - "probability": A float between 0.0 and 1.0 indicating your confidence that it is bullying/conflict.
-    """
-
+        return {"prediction": 0, "probability": 0.0}
+        
+    labels = ["aggressive bullying and targeted harassment", "friends joking around and casual conversation"]
     try:
-        from google.generativeai.types import HarmCategory, HarmBlockThreshold
-        safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        }
+        # Zero-shot classification automatically assigns probabilities to the candidate labels
+        result = classifier(transcript, candidate_labels=labels)
         
-        response = model.generate_content(prompt, safety_settings=safety_settings)
-        text = response.text.strip()
+        # Extract the probability for the "bullying" label
+        bully_idx = result["labels"].index("aggressive bullying and targeted harassment")
+        prob = result["scores"][bully_idx]
         
-        # Clean up markdown if Gemini wrapped it in ```json ... ```
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.endswith("```"):
-            text = text[:-3]
-            
-        result = json.loads(text.strip())
-        
-        # Validate schema
-        if "prediction" in result and "probability" in result:
-            return result
-        else:
-            print(f"Unexpected JSON schema from Gemini: {result}")
-            return {"prediction": 0, "probability": 0.0}
-            
+        prediction = 1 if prob > 0.5 else 0
+        return {"prediction": prediction, "probability": float(prob)}
     except Exception as e:
-        print(f"Error calling Gemini API: {e}")
+        print(f"Error classifying: {e}")
         return {"prediction": 0, "probability": 0.0}
 
 def main():
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("Error: GEMINI_API_KEY environment variable not found. Please add it to your .env file.")
-        sys.exit(1)
-        
-    genai.configure(api_key=api_key)
+    print("Loading Local Transformer Model (BART Zero-Shot)... This may take a moment.")
+    classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
     
-    # We use Flash because it is insanely fast and cheap, perfectly suited for this
-    model = genai.GenerativeModel('gemini-3.6-flash')
-
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     transcripts_path = os.path.join(project_root, 'data', 'transcripts.json')
     
@@ -86,19 +44,14 @@ def main():
         transcripts = json.load(f)
         
     print(f"Loaded {len(transcripts)} transcripts.")
-    print("Connecting to Gemini API for Semantic Analysis...")
+    print("Running Semantic Analysis locally...")
     
     results = {}
     
-    from tqdm import tqdm
     for filename, transcript in tqdm(transcripts.items()):
-        # Rate limiting protection (Flash is fast, but we should be polite)
-        time.sleep(0.1) 
-        
-        prediction = classify_text(model, transcript)
+        prediction = classify_text(classifier, transcript)
         results[filename] = prediction
 
-    # Save to JSON
     models_dir = os.path.join(project_root, 'models')
     os.makedirs(models_dir, exist_ok=True)
     

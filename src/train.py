@@ -33,13 +33,14 @@ def load_data(data_dir):
                 
             file_path = os.path.join(root, filename)
         
-            # Extract label from filename
+            # Extract label from folder name (PyTorch ImageFolder style)
             category = None
-            for k in label_map.keys():
-                if filename.startswith(k):
-                    category = k
-                    break
-                    
+            parent_folder = os.path.basename(root)
+            if parent_folder == 'bull':
+                category = 'bullying'
+            elif parent_folder == 'notbully':
+                category = 'not_bullying'
+                
             if category:
                 feat = extract_features(file_path)
                 if feat is not None:

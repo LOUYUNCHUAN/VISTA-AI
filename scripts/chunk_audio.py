@@ -71,6 +71,26 @@ def process_category(category_dir, train_out, test_out, prefix, test_size=0.2, c
     for f in tqdm(test_files):
         chunk_audio_file(os.path.join(category_dir, f), test_out, prefix, chunk_duration, overlap_duration)
 
+def extract_videos(video_dir, audio_dir):
+    if not os.path.exists(video_dir):
+        return
+    os.makedirs(audio_dir, exist_ok=True)
+    video_exts = ('.mp4', '.mov', '.mkv', '.avi')
+    for f in os.listdir(video_dir):
+        if f.lower().endswith(video_exts):
+            video_path = os.path.join(video_dir, f)
+            name = os.path.splitext(f)[0]
+            wav_path = os.path.join(audio_dir, f"{name}.wav")
+            if not os.path.exists(wav_path):
+                print(f"  Extracting audio from video: {f} -> {wav_path}")
+                try:
+                    from moviepy import VideoFileClip
+                    video = VideoFileClip(video_path)
+                    video.audio.write_audiofile(wav_path, logger=None)
+                    video.close()
+                except Exception as e:
+                    print(f"  Failed to extract audio from {f}: {e}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--chunk_duration", type=int, default=15)
@@ -85,10 +105,19 @@ if __name__ == "__main__":
     os.makedirs(train_out, exist_ok=True)
     os.makedirs(test_out, exist_ok=True)
     
-    print(f"=== Chunking & Splitting Pipeline ===")
+    bull_dir = os.path.join(project_root, "data", "audio", "bull")
+    notbully_dir = os.path.join(project_root, "data", "audio", "notbully")
+    
+    bull_vid_dir = os.path.join(project_root, "data", "videos", "bull")
+    notbully_vid_dir = os.path.join(project_root, "data", "videos", "notbully")
+    
+    print(f"=== Extracting Audio from Videos ===")
+    extract_videos(bull_vid_dir, bull_dir)
+    extract_videos(notbully_vid_dir, notbully_dir)
+    
+    print(f"\n=== Chunking & Splitting Pipeline ===")
     
     print("\n[Category: Bullying]")
-    bull_dir = os.path.join(project_root, "data", "audio", "bull")
     bull_train_out = os.path.join(train_out, "bull")
     bull_test_out = os.path.join(test_out, "bull")
     os.makedirs(bull_train_out, exist_ok=True)
@@ -96,7 +125,6 @@ if __name__ == "__main__":
     process_category(bull_dir, bull_train_out, bull_test_out, "bullying", args.test_size, args.chunk_duration, args.overlap_duration)
     
     print("\n[Category: Not Bullying]")
-    notbully_dir = os.path.join(project_root, "data", "audio", "notbully")
     notbully_train_out = os.path.join(train_out, "notbully")
     notbully_test_out = os.path.join(test_out, "notbully")
     os.makedirs(notbully_train_out, exist_ok=True)

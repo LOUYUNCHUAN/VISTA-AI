@@ -5,17 +5,16 @@ import joblib
 import json
 
 try:
-    from moviepy.editor import VideoFileClip
+    from moviepy import VideoFileClip
 except ImportError:
     print("Error: moviepy is not installed. Please run: pip install moviepy")
     sys.exit(1)
     
 try:
     import whisper
-    import google.generativeai as genai
-    from dotenv import load_dotenv
+    from transformers import pipeline
 except ImportError:
-    print("Error: openai-whisper or google-generativeai is not installed.")
+    print("Error: openai-whisper or transformers is not installed.")
     sys.exit(1)
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -36,7 +35,6 @@ def extract_audio_from_video(video_path, audio_out_path):
 
 def load_models():
     print("Loading Models (this may take a few seconds)...")
-    load_dotenv()
     
     models_dir = os.path.join(project_root, 'models')
     svm_path = os.path.join(models_dir, 'svm_model.joblib')
@@ -51,15 +49,14 @@ def load_models():
     
     whisper_model = whisper.load_model("base")
     
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("Error: GEMINI_API_KEY not found in .env file.")
+    print("Loading Local Transformer Model (BART Zero-Shot)...")
+    try:
+        nlp_classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
+    except Exception as e:
+        print(f"Failed to load transformer: {e}")
         sys.exit(1)
-        
-    genai.configure(api_key=api_key)
-    gemini_model = genai.GenerativeModel('gemini-3.6-flash')
     
-    return svm_pipeline, fusion_model, whisper_model, gemini_model
+    return svm_pipeline, fusion_model, whisper_model, nlp_classifier
 
 def main():
     parser = argparse.ArgumentParser(description="Test a full video using Asymmetric Multimodal Inference.")
@@ -79,7 +76,7 @@ def main():
         if not extract_audio_from_video(args.video, audio_path):
             sys.exit(1)
             
-    svm_pipeline, fusion_model, whisper_model, gemini_model = load_models()
+    svm_pipeline, fusion_model, whisper_model, nlp_classifier = load_models()
     
     print("\nStarting Asymmetric Inference Pipeline...")
     results = run_asymmetric_inference(
@@ -87,7 +84,7 @@ def main():
         svm_pipeline=svm_pipeline,
         fusion_model=fusion_model,
         whisper_model=whisper_model,
-        gemini_model=gemini_model,
+        nlp_classifier=nlp_classifier,
         chunk_duration=15,
         overlap=5
     )

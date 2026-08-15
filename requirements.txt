@@ -14,5 +14,6 @@ python-dotenv
 yt-dlp
 elevenlabs
 openai-whisper
-google-generativeai
+torch
+transformers
 moviepy
