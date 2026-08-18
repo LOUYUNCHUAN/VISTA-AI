@@ -17,3 +17,5 @@ openai-whisper
 torch
 transformers
 moviepy
+google-genai
+pydantic

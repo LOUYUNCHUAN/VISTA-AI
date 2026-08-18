@@ -1,113 +1,74 @@
 import os
-import sys
 import argparse
-from datetime import datetime
+from huggingface_hub import HfApi, snapshot_download, login
 from dotenv import load_dotenv
-from huggingface_hub import HfApi, snapshot_download
 
-# Load environment variables from .env
+# Load environment variables from .env (such as HF_TOKEN)
 load_dotenv()
 
-def get_api_and_repo():
-    token = os.getenv("hugging_face_api_token")
-    if not token:
-        print("Error: hugging_face_api_token not found in .env file.")
-        sys.exit(1)
-        
-    api = HfApi(token=token)
-    user = api.whoami()["name"]
-    repo_id = f"{user}/vista-ai-dataset"
-    return api, repo_id
+def upload_dataset(repo_id, local_dir):
+    """
+    Uploads the local data directory to a Hugging Face Dataset repository.
+    """
+    print(f"🚀 Preparing to upload local '{local_dir}' folder to Hugging Face dataset: {repo_id}")
+    api = HfApi()
+    
 
-def upload_dataset():
-    api, repo_id = get_api_and_repo()
-    
-    print(f"Ensuring repository {repo_id} exists...")
-    api.create_repo(repo_id=repo_id, repo_type="dataset", private=True, exist_ok=True)
-    
-    # Create branch name based on today's date (YYYY-MM-DD)
-    branch_name = datetime.now().strftime("%Y-%m-%d")
-    print(f"Creating/using branch: {branch_name}")
-    
+    # Attempt to create the repository if it doesn't already exist
     try:
-        api.create_branch(repo_id=repo_id, branch=branch_name, repo_type="dataset", exist_ok=True)
+        api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True, private=True)
+        print(f"✅ Verified repository '{repo_id}' exists on Hugging Face.")
     except Exception as e:
-        print(f"Note on branch creation: {e}")
-        
-    data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-    
-    if not os.path.exists(data_dir):
-        print(f"Error: Local data directory '{data_dir}' does not exist. Nothing to upload.")
-        sys.exit(1)
-        
-    print(f"Uploading {data_dir} to {repo_id} on branch {branch_name}...")
+        print(f"⚠️ Warning during repo creation/verification: {e}")
+        print("Make sure your HF_TOKEN has 'Write' permissions for the Vista-AI organization.")
+
+    # Upload the entire folder directly to the dataset repository
+    print(f"⏳ Uploading files from {local_dir}... This may take a few minutes depending on audio file size.")
     api.upload_folder(
-        folder_path=data_dir,
+        folder_path=local_dir,
         repo_id=repo_id,
         repo_type="dataset",
-        revision=branch_name,
-        commit_message=f"Dataset backup for {branch_name}",
-        ignore_patterns=["chunks/*", "**/.DS_Store"]
+        path_in_repo="data"  # Mirrors the local directory structure on the hub
     )
-    print("Upload complete! ✅")
+    print("✅ Upload complete! Your partner can now pull the dataset.")
 
-def download_dataset():
-    api, repo_id = get_api_and_repo()
+def download_dataset(repo_id, local_dir):
+    """
+    Downloads the dataset from Hugging Face back to the local machine.
+    """
+    print(f"📥 Downloading dataset from Hugging Face: {repo_id}...")
     
-    print(f"Fetching branches for repository {repo_id}...")
-    try:
-        refs = api.list_repo_refs(repo_id=repo_id, repo_type="dataset")
-    except Exception as e:
-        print(f"Error accessing repository. Does it exist? {e}")
-        sys.exit(1)
-        
-    branches = [branch.name for branch in refs.branches]
-    
-    # Filter for date branches
-    date_branches = []
-    for b in branches:
-        try:
-            # Validate format YYYY-MM-DD
-            datetime.strptime(b, "%Y-%m-%d")
-            date_branches.append(b)
-        except ValueError:
-            continue
-            
-    if not date_branches:
-        print("No date-formatted branches found (e.g., 2026-08-02). Cannot determine latest dataset.")
-        sys.exit(1)
-        
-    # Sort dates and pick the latest
-    date_branches.sort(reverse=True)
-    latest_branch = date_branches[0]
-    
-    print(f"Latest branch detected: {latest_branch}")
-    
-    data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-    os.makedirs(data_dir, exist_ok=True)
-    
-    print(f"Downloading dataset from branch '{latest_branch}' into {data_dir}...")
+    # Download the 'data/' folder from the hub into the local current directory
+    # (which will safely place it inside the local 'data/' folder)
     snapshot_download(
         repo_id=repo_id,
         repo_type="dataset",
-        revision=latest_branch,
-        local_dir=data_dir,
-        token=os.getenv("hugging_face_api_token"),
-        ignore_patterns=["chunks/*", "**/.DS_Store"]
+        local_dir=".",
+        allow_patterns="data/*"
     )
-    print("Download complete! ✅")
+    print(f"✅ Download complete! The dataset is ready in your '{local_dir}' folder.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Sync VISTA-AI dataset with Hugging Face")
-    parser.add_argument("--upload", action="store_true", help="Upload local data/ directory to Hugging Face")
-    parser.add_argument("--download", action="store_true", help="Download latest dataset from Hugging Face to local data/ directory")
+    parser = argparse.ArgumentParser(description="Hugging Face Dataset Sync Tool for Vista-AI")
+    parser.add_argument("action", choices=["upload", "download"], help="Choose whether to 'upload' to HF or 'download' from HF.")
+    parser.add_argument("--repo-id", type=str, default="Vista-AI/CustomerServiceAudio", help="The Hugging Face Dataset Repository ID (e.g., Vista-AI/dataset-name)")
+    parser.add_argument("--dir", type=str, default="data", help="The local directory containing the dataset.")
     
     args = parser.parse_args()
     
-    if args.upload:
-        upload_dataset()
-    elif args.download:
-        download_dataset()
+    # Authenticate seamlessly if HF_TOKEN is in the .env file
+    token = os.getenv("HF_TOKEN")
+    if token:
+        login(token=token)
+        print("🔐 Authenticated with Hugging Face via HF_TOKEN.")
     else:
-        print("Please specify --upload or --download")
-        parser.print_help()
+        print("⚠️ Warning: No HF_TOKEN found in .env.")
+        print("If the Vista-AI dataset is Private, or if you are Uploading, you must either:")
+        print("1. Add HF_TOKEN=your_token to your .env file.")
+        print("2. Run 'huggingface-cli login' in your terminal.")
+        print("-" * 50)
+
+    if args.action == "upload":
+        upload_dataset(args.repo_id, args.dir)
+    elif args.action == "download":
+        download_dataset(args.repo_id, args.dir)
