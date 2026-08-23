@@ -6,11 +6,11 @@ from dotenv import load_dotenv
 # Load environment variables from .env (such as HF_TOKEN)
 load_dotenv()
 
-def upload_dataset(repo_id, local_dir):
+def upload_dataset(repo_id, local_dirs):
     """
-    Uploads the local data directory to a Hugging Face Dataset repository.
+    Uploads the local data directories to a Hugging Face Dataset repository.
     """
-    print(f"🚀 Preparing to upload local '{local_dir}' folder to Hugging Face dataset: {repo_id}")
+    print(f"🚀 Preparing to upload local folders {local_dirs} to Hugging Face dataset: {repo_id}")
     api = HfApi()
     
 
@@ -22,37 +22,46 @@ def upload_dataset(repo_id, local_dir):
         print(f"⚠️ Warning during repo creation/verification: {e}")
         print("Make sure your HF_TOKEN has 'Write' permissions for the Vista-AI organization.")
 
-    # Upload the entire folder directly to the dataset repository
-    print(f"⏳ Uploading files from {local_dir}... This may take a few minutes depending on audio file size.")
-    api.upload_folder(
-        folder_path=local_dir,
-        repo_id=repo_id,
-        repo_type="dataset",
-        path_in_repo="data"  # Mirrors the local directory structure on the hub
-    )
+    for local_dir in local_dirs:
+        if not os.path.exists(local_dir):
+            print(f"⚠️ Directory '{local_dir}' does not exist, skipping.")
+            continue
+            
+        print(f"⏳ Uploading files from {local_dir}... This may take a few minutes.")
+        
+        # Ignore temporary youtube downloads to save space
+        ignore_patterns = ["audio/tmp/*"] if local_dir == "data" else None
+        
+        api.upload_folder(
+            folder_path=local_dir,
+            repo_id=repo_id,
+            repo_type="dataset",
+            path_in_repo=local_dir,  # Mirrors the local directory structure on the hub
+            ignore_patterns=ignore_patterns
+        )
     print("✅ Upload complete! Your partner can now pull the dataset.")
 
-def download_dataset(repo_id, local_dir):
+def download_dataset(repo_id, local_dirs):
     """
     Downloads the dataset from Hugging Face back to the local machine.
     """
     print(f"📥 Downloading dataset from Hugging Face: {repo_id}...")
     
-    # Download the 'data/' folder from the hub into the local current directory
-    # (which will safely place it inside the local 'data/' folder)
+    allow_patterns = [f"{d}/*" for d in local_dirs]
+    
     snapshot_download(
         repo_id=repo_id,
         repo_type="dataset",
         local_dir=".",
-        allow_patterns="data/*"
+        allow_patterns=allow_patterns
     )
-    print(f"✅ Download complete! The dataset is ready in your '{local_dir}' folder.")
+    print(f"✅ Download complete! The data and models are ready in your workspace.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hugging Face Dataset Sync Tool for Vista-AI")
     parser.add_argument("action", choices=["upload", "download"], help="Choose whether to 'upload' to HF or 'download' from HF.")
     parser.add_argument("--repo-id", type=str, default="Vista-AI/CustomerServiceAudio", help="The Hugging Face Dataset Repository ID (e.g., Vista-AI/dataset-name)")
-    parser.add_argument("--dir", type=str, default="data", help="The local directory containing the dataset.")
+    parser.add_argument("--dirs", nargs="+", default=["data", "models"], help="The local directories to sync.")
     
     args = parser.parse_args()
     
@@ -69,6 +78,6 @@ if __name__ == "__main__":
         print("-" * 50)
 
     if args.action == "upload":
-        upload_dataset(args.repo_id, args.dir)
+        upload_dataset(args.repo_id, args.dirs)
     elif args.action == "download":
-        download_dataset(args.repo_id, args.dir)
+        download_dataset(args.repo_id, args.dirs)
