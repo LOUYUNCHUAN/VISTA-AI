@@ -31,7 +31,7 @@ VOICE_MAP = {
 class AudioAssembler:
     def __init__(self, sample_rate=16000):
         self.sr = sample_rate
-        # Customer on Left (channel 0), Engineer on Right (channel 1)
+        # Customer on Left (channel 0), Engineer on Right (`channel 1)
         self.stereo_mix = np.zeros((60 * self.sr, 2), dtype=np.int16)
         self.cursor = 0 # current position in samples
         self.end_sample = 0
