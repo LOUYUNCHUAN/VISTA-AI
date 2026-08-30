@@ -5,83 +5,109 @@ Welcome to the VISTA-AI repository! This document serves as the master blueprint
 ## 1. Project Overview
 VISTA-AI is a multimodal PyTorch deep learning framework designed to predict Customer Satisfaction (CSAT) scores by combining **linguistic text semantics** and **acoustic prosody features** directly from conversational audio. 
 
-The architecture is built from scratch and relies on:
-- **Linguistic Path (Text):** 768-dimensional sentence embeddings (via `all-mpnet-base-v2`).
-- **Acoustic Path (Audio):** 
-  - *Architecture A (Bi-LSTM)*: 25-dimensional Low-Level Descriptors extracted via `opensmile` (eGeMAPSv02), dynamically processed through a custom Bidirectional LSTM.
-  - *Architecture B (Hybrid CNN)*: 2D Log-Mel Spectrograms processed through a lightweight Y-shaped 2D CNN block.
-- **Multimodal Fusion:** 
-  - *Architecture A*: A custom Gated Multimodal Unit (GMU) fusing both modalities, optimized with an auxiliary InfoNCE Contrastive Loss.
-  - *Architecture B*: 1D Vector Concatenation + Shared Dense layer with LayerNorm and high Dropout (0.4) for small-sample regularization.
-
-2. **`scripts/04_extract_features.py` (ASR & Chunking)**  
-   - Processes the `data/audio/out/*.wav` files.
-   - For `bilstm`: Extracts OpenSMILE features and SentenceTransformer embeddings using ground-truth JSON.
-   - For `hybrid_cnn`: Uses **Whisper `small.en` ASR** to dynamically transcribe and chunk the audio into semantic segments (up to 10s each). Extracts Log-Mel Spectrograms and SentenceTransformer embeddings for each chunk (saving to `data/features/`).
-
-3. **`src/train.py` (Unified Training)**  
-   - Trains the selected architecture.
-   - The Hybrid CNN uses Mean Pooling to aggregate predictions across variable-length audio chunks.
-   - Generates weights at `models/{model_type}_weights.pt`.
-
-4. **`scripts/05_test_youtube.py` (E2E Validation)**
-   - Uses `yt-dlp` to download a real-world YouTube customer complaint.
-   - Runs local Whisper transcription, semantic chunking, and executes the trained `hybrid_cnn` model to output the final CSAT probabilities.
-
-5. **`app.py` (Streamlit Web UI)**
-   - An interactive web application that wraps the `05_test_youtube.py` logic.
-   - Provides an easy-to-use interface to input URLs, view the transcript, and visualize the model's confidence distribution via a bar chart.
+The architecture supports dual comparative implementations:
+- **Linguistic Path (Text):** 768-dimensional sentence embeddings (via `sentence-transformers/all-mpnet-base-v2`).
+- **Acoustic Path (Audio):** 768-dimensional self-supervised speech representations extracted directly from raw 16kHz audio chunks via **`microsoft/wavlm-base-plus`** (capturing fine-grained pitch inflection, vocal tension, sarcasm, and prosody).
+- **V1 Baseline Architecture (`DualTransformerClassifier`):**
+  - Linear Projections with LayerNorm, GELU, and Dropout.
+  - Bidirectional Cross-Modal Attention ($Q=T, K=A, V=A$ and $Q=A, K=T, V=T$).
+  - 2-layer Sequence Transformer Encoder across dialogue segments with Sinusoidal Positional Encoding (up to 1024 turns).
+  - Mean-pooled 4-class CSAT classification head.
+  - Saved weights: `models/dual_transformer_v1_weights.pt`.
+- **V2 Upgraded Architecture (`EnhancedDualTransformerClassifier`):**
+  - Pre-LN 2-layer **`MLPResBlock`** Feature Adaptation Head for non-linear domain tuning.
+  - Bidirectional Cross-Modal Attention Fusion.
+  - Learnable **`[CLS]` Token** prepending to explicitly model global conversational sentiment.
+  - Saved weights: `models/dual_transformer_v2_weights.pt` (and `models/dual_transformer_weights.pt`).
+- **Hardware Acceleration:** Native Apple Silicon GPU acceleration via PyTorch MPS backend (`torch.device("mps")`).
 
 ## 2. Directory Structure
-The repository has been structured according to strict software engineering standards to separate executable scripts from the core deep learning modules:
+The repository has been structured according to strict software engineering standards:
 
 ```text
 VISTA-AI/
 ├── .agents/                    # Workspace rules and handoff context
 ├── .env                        # Environment variables (e.g., ELEVENLABS_API_KEY, HF_TOKEN)
-├── data/                       # (Auto-generated) Datasets
-│   ├── audio/out/              # Final synthesized WAV files (stereo)
-│   ├── features/               # Extracted PyTorch tensors (.pt) ready for training
-│   └── raw/                    # Raw JSONL transcripts and metadata
-├── scripts/                    # Sequential Data Processing Pipeline
-│   ├── 01_generate_scripts.py  # Generates initial CSAT dialogues via Gemini
-│   ├── 02_augment_scripts.py   # Expands the dataset to 500+ samples
-│   ├── 03_synthesize_audio.py  # Converts JSON transcripts to TTS audio via ElevenLabs
-│   ├── 04_extract_features.py  # Extracts OpenSMILE & Text embeddings from audio/JSON
-│   └── hf_dataset_sync.py      # Hugging Face upload/download utility
+├── app.py                      # Interactive Streamlit Web UI (Side-by-side V1 vs V2)
+├── data/                       # Datasets & Metadata
+│   ├── audio/out/              # Synthesized WAV files (stereo)
+│   ├── audio/youtube/          # Downloaded YouTube 16kHz audio & captions/
+│   ├── features/               # 326 extracted PyTorch tensors (audio_embeds, text_embeds, label)
+│   ├── raw/                    # Raw JSONL transcripts and metadata
+│   ├── train_test_split.json   # Zero-leakage conversation-level train/test split manifest
+│   └── youtube_metadata.jsonl  # YouTube titles, captions, and Whisper transcripts
+├── models/                     # Trained checkpoints (dual_transformer_v1_weights.pt, v2_weights.pt)
+├── scripts/                    # Pipeline Scripts
+│   ├── 01_generate_scripts.py     # Generates initial CSAT dialogues via Gemini
+│   ├── 02_augment_scripts.py      # Expands synthetic dataset to 500+ samples
+│   ├── 03_synthesize_audio.py     # Converts JSON transcripts to TTS audio via ElevenLabs
+│   ├── 04_extract_features.py     # Extracts WavLM & Text embeddings from audio/JSON
+│   ├── 05_test_youtube.py         # Side-by-side V1 vs V2 validation script with telemetry
+│   ├── evaluate_asr.py            # Evaluates Whisper ASR accuracy vs YouTube captions (WER)
+│   ├── ingest_youtube_dataset.py  # Ingests YouTube playlists, removes B-roll & extracts features
+│   └── hf_dataset_sync.py         # Hugging Face upload/download utility
 └── src/                        # Core PyTorch Framework
     ├── data/
-    │   └── dataset.py          # Custom PyTorch Dataset (RealCSATDataset) and collate_fn
+    │   └── dataset.py          # Custom PyTorch Dataset (RealCSATDataset) with conversation isolation
     ├── models/
-    │   └── architecture.py     # Bi-LSTM, GMU, InfoNCELoss, and the main Classifier
-    └── train.py                # Main training loop (Run via `python src/train.py`)
+    │   └── architecture.py     # DualTransformerClassifier (V1), EnhancedDualTransformerClassifier (V2), MLPResBlock
+    └── train.py                # Comparative training loop (Run via `python src/train.py --model_version both`)
 ```
 
 ## 3. The Execution Workflow
-If you are pulling this repository fresh, you do **not** need to generate the synthetic data from scratch. 
 
-### Step 1: Download the Data
-The full dataset (JSON, WAV files, and PyTorch Tensors) is hosted securely on Hugging Face. Download it directly into the `data/` folder by running:
+### Step 1: Download or Ingest Data
+- **Hugging Face Sync:**
+  ```bash
+  python scripts/hf_dataset_sync.py download --repo-id Vista-AI/CustomerServiceAudio
+  ```
+- **Ingest Real YouTube Playlists:**
+  ```bash
+  python scripts/ingest_youtube_dataset.py
+  ```
+
+### Step 2: Feature Extraction (Whisper ASR + WavLM + SentenceTransformer)
+Extract multimodal segment representations:
 ```bash
-python scripts/hf_dataset_sync.py download --repo-id Vista-AI/CustomerServiceAudio
-```
-*(Ensure your `HF_TOKEN` in the `.env` file has read access if the repo is private).*
-
-### Step 2: Train the Model
-Once the `data/features/` folder is populated with `.pt` files, you can immediately begin iterating on the model architecture and training. 
-
-We now support two parallel architectures that you can toggle via the `--model_type` argument:
-
-**Option A: Bi-LSTM + GMU (Legacy)**
-```bash
-python src/train.py --model_type bilstm
+python scripts/04_extract_features.py
 ```
 
-**Option B: Hybrid 2D CNN + Pre-trained Transformer (New)**
+### Step 3: Train Both V1 Baseline and V2 Upgraded Models
+Train both architectures side-by-side on Apple Silicon GPU (`mps`):
 ```bash
-python src/train.py --model_type hybrid_cnn
+python src/train.py --model_version both --epochs 25 --batch_size 16 --lr 2e-4
 ```
+Weights will be saved to `models/dual_transformer_v1_weights.pt` and `models/dual_transformer_v2_weights.pt`.
 
-## 4. Active To-Dos / Next Steps
-- The model currently achieves ~99.6% training accuracy on the synthetic dataset, proving the custom Bi-LSTM and GMU architectures converge perfectly.
-- **Future Work:** Evaluate generalization on a hidden validation set, tune the contrastive loss `alpha` weighting parameter (currently `0.5`), or experiment with different OpenSMILE functional sets.
+### Step 4: Side-by-Side Inference & Telemetry
+- **CLI Comparative Test with Telemetry:**
+  ```bash
+  python scripts/05_test_youtube.py
+  ```
+- **Streamlit Web Dashboard:**
+  ```bash
+  streamlit run app.py
+  ```
+
+## 4. Current Status & Verification
+- **4 CSAT Categories:**
+  1. `Very Unsatisfied` (Happy / strong emotion, problem solved) — `_very_unsatisfied.wav`
+  2. `Unsatisfied` (Flat emotion, problem not solved) — `_unsatisfied.wav`
+  3. `Satisfied` (Flat emotion, problem solved) — `_satisfied.wav`
+  4. `Very Satisfied` (Strong angry / shouting, problem not solved) — `_very_satisfied.wav`
+- **Dataset Size:** 326 multimodal dialogue samples (307 synthetic in `data/audio/out/` + 19 real-world YouTube dialogues in `data/audio/youtube/`).
+- **Train/Test Isolation (`data/train_test_split.json`):**
+  - **Train Set:** 278 dialogues (264 synthetic + 14 YouTube).
+  - **Test Set:** 48 dialogues (43 synthetic + 5 held-out YouTube).
+  - **YouTube Preservation:** Every category has at least 1 full video held out exclusively for test.
+  - **Zero Leakage:** 0 files shared between train and test.
+- **Benchmark Accuracies (MPS GPU):**
+  - V1 Baseline (Mean Pooling): **100.0% Train Acc**, **93.8% Test Acc**, **40.0% Held-out YouTube Acc** (`models/dual_transformer_v1_weights.pt`).
+  - V2 Upgraded (`MLPResBlock` + `[CLS]`): **100.0% Train Acc**, **91.7% Test Acc**, **40.0% Held-out YouTube Acc** (`models/dual_transformer_v2_weights.pt`).
+- **Real-World Dispute Test:** Both V1 (99.47%) and V2 (99.57%) correctly predict `Very Unsatisfied`.
+
+
+
+
+
+

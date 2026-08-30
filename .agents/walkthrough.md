@@ -1,110 +1,92 @@
 # VISTA-AI: Complete Pipeline Walkthrough
 
-Welcome to the end-to-end guide for running VISTA-AI. This guide will walk you through setting up the environment, synthesizing audio data, extracting multimodal features (ASR + CNN), training the model, and running inference on a real-world YouTube video.
+A simple, step-by-step guide to run the VISTA-AI multimodal CSAT classification framework (`microsoft/wavlm-base-plus` + `all-mpnet-base-v2` + Cross-Modal Attention) on Apple Silicon (`mps`).
 
 ---
 
 ## 1. Environment Setup
 
-Before running anything, ensure your virtual environment is activated and dependencies are installed.
-
 ```bash
-# 1. Create and activate a virtual environment
-python3 -m venv .venv
+# 1. Activate virtual environment
 source .venv/bin/activate
 
-# 2. Install required packages
+# 2. Install dependencies
 pip install -r requirements.txt
-pip install -U yt-dlp  # Ensure yt-dlp is updated for YouTube extraction
+pip install -U yt-dlp
 
-# 3. Create necessary directories
-mkdir -p data/raw data/audio/tmp data/audio/out data/features models
+# 3. Ensure required directories exist
+mkdir -p data/raw data/audio/youtube/captions data/audio/out data/features models
 ```
 
 ---
 
-## 2. Generating Synthetic Audio Data
+## 2. The 4 Target CSAT Categories
 
-Since we start with text dialogues (`data/raw/dialogues.jsonl`), we first need to convert these transcripts into stereo `.wav` audio files using the ElevenLabs Text-to-Speech API.
+| Index | Category Name | Emotional & Resolution Criteria |
+| :---: | :--- | :--- |
+| **0** | **Very Unsatisfied** | Happy / strong emotion, problem solved (`promoter_delighted`) |
+| **1** | **Unsatisfied** | Flat emotion, problem not solved (`at_risk_dissatisfied`) |
+| **2** | **Satisfied** | Flat emotion, problem solved (`standard_resolved`) |
+| **3** | **Very Satisfied** | Strong angry / shouting, problem not solved (`urgent_follow_up`) |
 
-> [!IMPORTANT]
-> Ensure you have your `ELEVENLABS_API_KEY` set up in a `.env` file in the root of the project.
+---
 
+## 3. Data Ingestion & Feature Extraction
+
+### Option A: Ingest Real YouTube Playlists (Download + Captions + B-Roll Removal + Features)
 ```bash
-python scripts/03_synthesize_audio.py
+python scripts/ingest_youtube_dataset.py
 ```
-**What happens here:**
-- The script reads the simulated dialogues.
-- It concurrently calls the TTS API to synthesize both customer and engineer voices.
-- It mixes the voices into a stereo `.wav` file where the Customer is on the Left Channel and the Engineer is on the Right Channel.
-- The output files will be saved in `data/audio/out/`.
+- Downloads 16kHz audio and `.vtt` captions from YouTube.
+- Strips B-roll intros, outro promos, and music.
+- Extracts 768-d WavLM acoustic prosody + 768-d MPNet text semantics into `data/features/yt_*.pt`.
 
----
-
-## 3. Feature Extraction (Whisper ASR + Mel-Spectrogram)
-
-Now we process the raw `.wav` audio files. We use a **Hybrid CNN Architecture** that extracts spatial-temporal acoustic features and deep linguistic embeddings.
-
+### Option B: Unified Feature Extraction from All Local Audio (`data/audio/out` + `data/audio/youtube`)
 ```bash
 python scripts/04_extract_features.py
 ```
-**What happens here:**
-- **Local ASR:** The script loads the OpenAI Whisper (`small.en`) model.
-- **Chunking:** It dynamically transcribes the audio into semantic segments/chunks.
-- **Linguistic Extraction:** It extracts a 768-dimensional text embedding for each chunk using `SentenceTransformers`.
-- **Acoustic Extraction:** It generates a Log-Mel Spectrogram for each chunk, padded/truncated to 10 seconds.
-- The combined tensors are saved as `.pt` files in `data/features/`.
+- Processes all synthesized dialogues (`data/audio/out/*.wav` $\to$ `data/features/dial_*.pt`).
+- Processes all downloaded YouTube calls (`data/audio/youtube/*.wav` $\to$ `data/features/yt_*.pt`).
 
-> [!NOTE]
-> Whisper extraction can be compute-intensive. On an Apple Silicon M-series chip, this might take ~5 seconds per dialogue.
+
+### (Optional) Benchmark Speech-to-Text Accuracy
+```bash
+python scripts/evaluate_asr.py
+```
 
 ---
 
-## 4. Model Training
+## 4. Model Training (Side-by-Side V1 & V2 Comparison)
 
-With the chunked features extracted, we can train the **Y-Shaped Hybrid CNN** model.
+Train both the **V1 Baseline** (Linear + Mean Pooling) and **V2 Upgraded** (`MLPResBlock` + `[CLS]` Token) on Apple Silicon GPU (`mps`) with strict conversation-level isolation:
 
 ```bash
-python src/train.py
+python src/train.py --model_version both --epochs 25 --batch_size 16 --lr 2e-4
 ```
-**What happens here:**
-- The script automatically loads the chunks and dynamically pads the sequences `(Batch, Segments, 1, 128, 312)` using `pad_collate`.
-- The `YShapedHybridCNN` processes every segment independently and uses **Mean Pooling** to aggregate the chunks into a final prediction.
-- It trains for 10 epochs and saves the model weights to `models/hybrid_cnn_weights.pt`.
+- **Strict Isolation:** Zero-leakage conversation splits (278 Train / 48 Test samples, 5 held-out real-world YouTube videos).
+- **Benchmark Results:**
+  - V1 Baseline: **100.0% Train Acc**, **93.8% Test Acc**, **40.0% Held-out YouTube Acc** (`models/dual_transformer_v1_weights.pt`).
+  - V2 Upgraded: **100.0% Train Acc**, **91.7% Test Acc**, **40.0% Held-out YouTube Acc** (`models/dual_transformer_v2_weights.pt`).
+
 
 ---
 
-## 5. End-to-End Validation (YouTube Video)
+## 5. Side-by-Side Inference & Deep Debug Telemetry
 
-To prove the robustness of our architecture, we can test it directly on an unseen real-world video. We've prepared a script that downloads an "Angry Customer Complaint" video from YouTube.
-
+### Run CLI Prediction Test with Telemetry
 ```bash
 python scripts/05_test_youtube.py
 ```
-**What happens here:**
-1. Uses `yt-dlp` to download the audio track from the YouTube URL.
-2. Runs the local Whisper model to transcribe the audio and generate chunks.
-3. Passes the chunks into the trained model weights.
-4. Outputs the final prediction probabilities for the 4 CSAT categories (e.g., `at_risk_dissatisfied`).
+- Concurrently runs both **V1 Baseline** and **V2 Upgraded** models.
+- Outputs comparative prediction tables, confidence deltas ($\Delta\%$), and deep telemetry (embedding norms $\|\mathbf{a}\|_2, \|\mathbf{t}\|_2$, raw logits, and segment timestamps).
 
-> [!TIP]
-> If you test with only a few mock examples, the model might not predict anger correctly. Train it on the entire dataset (307+ files) for optimal classification performance!
-
----
-
-## 6. Interactive Web UI (Demo)
-
-We have built a beautiful **Streamlit Web Application** to interactively demonstrate the full pipeline.
-
-To start the UI:
+### Launch Streamlit Web Dashboard
 ```bash
 streamlit run app.py
 ```
+- Open `http://localhost:8501`.
+- Displays dual-model prediction cards, side-by-side probability charts, and an expandable interactive debug telemetry inspector.
 
-Then, open your browser to `http://localhost:8501`. 
 
-**In the UI, you can:**
-- Paste any YouTube link.
-- Watch as it dynamically downloads the audio and extracts Whisper semantic chunks.
-- Read the full Whisper transcript in an expandable box.
-- View a beautiful probability distribution chart of the CSAT prediction!
+
+

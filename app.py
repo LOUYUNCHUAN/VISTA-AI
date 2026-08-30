@@ -1,62 +1,86 @@
 import os
 import sys
+import time
+import warnings
+warnings.filterwarnings("ignore")
+
 import torch
 import librosa
 import numpy as np
 import whisper
 import subprocess
-import streamlit as st
+import soundfile as sf
 import pandas as pd
+import streamlit as st
+import transformers
+transformers.logging.set_verbosity_error()
+
+from transformers import AutoFeatureExtractor, WavLMModel
 from sentence_transformers import SentenceTransformer
 
 # Add src to path so we can import architecture
 sys.path.append(os.path.abspath("src"))
-from models.architecture import YShapedHybridCNN
+from models.architecture import DualTransformerClassifier, EnhancedDualTransformerClassifier
 
-st.set_page_config(page_title="VISTA-AI: Multimodal CSAT Demo", layout="wide")
 
-st.title("🎧 VISTA-AI: Customer Complaint Analyzer")
-st.markdown("Analyze YouTube customer calls using our **Y-Shaped Hybrid CNN** and **Local Whisper ASR**.")
+st.set_page_config(
+    page_title="VISTA-AI: Dual Transformer CSAT Analyzer",
+    page_icon="🎧",
+    layout="wide"
+)
+
+st.title("🎧 VISTA-AI: Multimodal CSAT & Emotion Analyzer")
+st.markdown("Side-by-side evaluation comparing **V1 Baseline (Linear + Mean Pooling)** vs. **V2 Upgraded (MLP ResBlock + [CLS] Token)** on Apple Silicon GPU (`mps`).")
 
 # -----------------
-# 1. LOAD MODELS (Cached to prevent reloading on every UI interaction)
+# 1. LOAD MODELS (Cached for UI efficiency)
 # -----------------
 @st.cache_resource
 def load_models():
-    device = torch.device("cpu")
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
     
     # 1. Whisper ASR
     whisper_model = whisper.load_model("small.en")
     
     # 2. Text Encoder
-    text_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+    text_model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
     
-    # 3. Multimodal CNN
-    hybrid_cnn = YShapedHybridCNN(num_classes=4, text_dim=768)
-    weights_path = "models/hybrid_cnn_weights.pt"
-    if os.path.exists(weights_path):
-        hybrid_cnn.load_state_dict(torch.load(weights_path, map_location=device))
-        hybrid_cnn.eval()
-    else:
-        st.error(f"Weights not found at {weights_path}. Please run training first.")
+    # 3. WavLM Audio Encoder
+    wavlm_processor = AutoFeatureExtractor.from_pretrained("microsoft/wavlm-base-plus")
+    wavlm_model = WavLMModel.from_pretrained("microsoft/wavlm-base-plus").to(device).eval()
+    
+    # 4. V1 Baseline Model
+    model_v1 = DualTransformerClassifier(num_classes=4, audio_dim=768, text_dim=768).to(device)
+    v1_path = "models/dual_transformer_v1_weights.pt" if os.path.exists("models/dual_transformer_v1_weights.pt") else "models/dual_transformer_weights.pt"
+    if os.path.exists(v1_path):
+        model_v1.load_state_dict(torch.load(v1_path, map_location=device))
+        model_v1.eval()
         
-    return whisper_model, text_model, hybrid_cnn
+    # 5. V2 Upgraded Model
+    model_v2 = EnhancedDualTransformerClassifier(num_classes=4, audio_dim=768, text_dim=768).to(device)
+    v2_path = "models/dual_transformer_v2_weights.pt" if os.path.exists("models/dual_transformer_v2_weights.pt") else "models/dual_transformer_weights.pt"
+    if os.path.exists(v2_path):
+        model_v2.load_state_dict(torch.load(v2_path, map_location=device))
+        model_v2.eval()
+        
+    return device, whisper_model, text_model, wavlm_processor, wavlm_model, model_v1, model_v2
 
-whisper_model, text_model, hybrid_cnn = load_models()
+device, whisper_model, text_model, wavlm_processor, wavlm_model, model_v1, model_v2 = load_models()
 
 # -----------------
 # 2. UI INPUT
 # -----------------
-youtube_url = st.text_input("Enter YouTube Video URL:", value="https://youtu.be/gD7xQGXpSBg")
-run_button = st.button("Analyze Audio")
+with st.container(border=True):
+    youtube_url = st.text_input("Enter YouTube Video URL:", value="https://youtu.be/gD7xQGXpSBg")
+    run_button = st.button("Analyze Audio with Both Models", type="primary")
 
 def get_video_id(url):
     import urllib.parse
     parsed = urllib.parse.urlparse(url)
-    if 'youtu.be' in parsed.netloc:
-        return parsed.path.lstrip('/')
-    elif 'youtube.com' in parsed.netloc:
-        return urllib.parse.parse_qs(parsed.query).get('v', [None])[0]
+    if "youtu.be" in parsed.netloc:
+        return parsed.path.lstrip("/")
+    elif "youtube.com" in parsed.netloc:
+        return urllib.parse.parse_qs(parsed.query).get("v", [None])[0]
     return "unknown_video"
 
 if run_button and youtube_url:
@@ -68,10 +92,8 @@ if run_button and youtube_url:
     tmp_audio = f"data/audio/tmp/{video_id}.wav"
     os.makedirs("data/audio/tmp", exist_ok=True)
     
-    st.write("---")
-    
     # -----------------
-    # 3. PIPELINE
+    # 3. AUDIO INGESTION & ASR
     # -----------------
     with st.spinner("Downloading YouTube Audio..."):
         if not os.path.exists(tmp_audio):
@@ -84,93 +106,158 @@ if run_button and youtube_url:
             ]
             try:
                 subprocess.run(cmd, check=True, capture_output=True)
-            except subprocess.CalledProcessError as e:
-                st.error("YouTube blocked the download (HTTP 429). Try downloading it manually via terminal passing cookies.")
+            except subprocess.CalledProcessError:
+                st.error("YouTube blocked automated download (HTTP 429). Please run manual download with browser cookies.")
                 st.stop()
         else:
-            st.info("Audio already exists in cache. Skipping download.")
+            st.info("Audio cached locally.")
             
-    with st.spinner("Transcribing with Whisper & Semantic Chunking..."):
-        # Whisper expects float32
-        import soundfile as sf
+    with st.spinner("Transcribing with Whisper & extracting WavLM prosody + MPNet text embeddings..."):
         audio_data, sr = sf.read(tmp_audio)
         if audio_data.ndim > 1:
             audio_data = audio_data[:, 0]
             
+        audio_duration = len(audio_data) / sr
         customer_audio_fp32 = audio_data.astype(np.float32)
         transcription = whisper_model.transcribe(customer_audio_fp32)
         
-        mel_specs = []
+        audio_embeds = []
         chunked_text_embeds = []
-        MAX_FRAMES = 312 # 10 seconds
-        
         full_transcript = ""
+        segment_details = []
         
-        for segment in transcription["segments"]:
+        for idx, segment in enumerate(transcription["segments"]):
             seg_text = segment["text"].strip()
             if not seg_text: continue
             
             full_transcript += f"{seg_text} "
-            
             start_sample = int(segment["start"] * sr)
             end_sample = int(segment["end"] * sr)
             seg_audio = customer_audio_fp32[start_sample:end_sample]
             
-            if len(seg_audio) == 0: continue
+            if len(seg_audio) < 160: continue
             
-            # Log-Mel
-            mel_spec = librosa.feature.melspectrogram(y=seg_audio, sr=sr, n_mels=128, hop_length=512)
-            log_mel_spec = librosa.power_to_db(mel_spec, ref=np.max)
-            mel_tensor = torch.tensor(log_mel_spec, dtype=torch.float32)
-            
-            if mel_tensor.shape[1] > MAX_FRAMES:
-                mel_tensor = mel_tensor[:, :MAX_FRAMES]
-            else:
-                pad_amount = MAX_FRAMES - mel_tensor.shape[1]
-                mel_tensor = torch.nn.functional.pad(mel_tensor, (0, pad_amount), value=0.0)
+            # WavLM Acoustic Prosody
+            inputs = wavlm_processor(seg_audio, sampling_rate=sr, return_tensors="pt")
+            input_values = inputs.input_values.to(device)
+            with torch.no_grad():
+                outputs = wavlm_model(input_values)
+                a_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0) # (768,)
                 
-            # Text Embed
-            t_emb = text_model.encode(seg_text, convert_to_tensor=True).cpu()
+            # Text Semantics
+            t_emb = text_model.encode(seg_text, convert_to_tensor=True).to(device)
             
-            mel_specs.append(mel_tensor.unsqueeze(0))
+            audio_embeds.append(a_emb)
             chunked_text_embeds.append(t_emb)
+            segment_details.append({
+                "#": idx + 1,
+                "Start": f"{segment['start']:.1f}s",
+                "End": f"{segment['end']:.1f}s",
+                "Duration": f"{segment['end'] - segment['start']:.1f}s",
+                "Text": seg_text,
+                "Audio Norm (||a||)": f"{a_emb.norm().item():.2f}",
+                "Text Norm (||t||)": f"{t_emb.norm().item():.2f}"
+            })
             
-        st.success(f"Extracted {len(mel_specs)} dynamic semantic chunks!")
+        st.success(f"Extracted {len(audio_embeds)} dialogue segments (Total duration: {audio_duration:.1f}s).")
         
-    with st.expander("View Whisper Transcript"):
+    with st.expander("📝 View Full Dialogue Transcript", expanded=False):
         st.write(full_transcript)
+        if segment_details:
+            st.dataframe(pd.DataFrame(segment_details), use_container_width=True)
         
     # -----------------
-    # 4. INFERENCE
+    # 4. SIDE-BY-SIDE INFERENCE
     # -----------------
-    with st.spinner("Running Hybrid CNN Inference..."):
-        if not mel_specs:
-            st.error("No valid audio segments found.")
+    with st.spinner("Executing Dual Model Inference (V1 Baseline & V2 Upgraded)..."):
+        if not audio_embeds:
+            st.error("No valid audio segments detected in the recording.")
             st.stop()
             
-        mel_specs_tensor = torch.stack(mel_specs).unsqueeze(0) # (1, S, 1, 128, 312)
-        chunked_text_tensor = torch.stack(chunked_text_embeds).unsqueeze(0) # (1, S, 768)
+        audio_tensor = torch.stack(audio_embeds).unsqueeze(0).to(device)       # (1, S, 768)
+        chunked_text_tensor = torch.stack(chunked_text_embeds).unsqueeze(0).to(device) # (1, S, 768)
         
+        # V1 Inference
+        t0 = time.perf_counter()
         with torch.no_grad():
-            logits, _, _ = hybrid_cnn(chunked_text_tensor, mel_specs_tensor)
-            probs = torch.softmax(logits, dim=1).squeeze(0)
-            
-        classes = ["Urgent Follow-Up", "At-Risk/Dissatisfied", "Standard/Resolved", "Promoter/Delighted"]
+            logits_v1, _, _ = model_v1(chunked_text_tensor, audio_tensor)
+            probs_v1 = torch.softmax(logits_v1, dim=1).squeeze(0)
+        t_v1 = (time.perf_counter() - t0) * 1000
         
-        # Build DataFrame for Chart
-        df = pd.DataFrame({
-            "Probability": [p.item() * 100 for p in probs],
-            "Category": classes
-        }).set_index("Category")
+        # V2 Inference
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            logits_v2, _, _ = model_v2(chunked_text_tensor, audio_tensor)
+            probs_v2 = torch.softmax(logits_v2, dim=1).squeeze(0)
+        t_v2 = (time.perf_counter() - t0) * 1000
         
-        pred_idx = torch.argmax(probs).item()
-        final_prediction = classes[pred_idx]
+        classes = ["Very Unsatisfied", "Unsatisfied", "Satisfied", "Very Satisfied"]
+        
+        pred_v1_idx = torch.argmax(probs_v1).item()
+        pred_v2_idx = torch.argmax(probs_v2).item()
+        
+        pred_v1 = classes[pred_v1_idx]
+        pred_v2 = classes[pred_v2_idx]
+        
+        conf_v1 = probs_v1[pred_v1_idx].item() * 100
+        conf_v2 = probs_v2[pred_v2_idx].item() * 100
         
     # -----------------
-    # 5. RESULTS DISPLAY
+    # 5. COMPARATIVE RESULTS DISPLAY
     # -----------------
-    st.markdown("### Model Prediction")
-    st.metric(label="Final CSAT Status", value=final_prediction)
+    st.markdown("### ⚖️ Side-by-Side Model Prediction Comparison")
+    col1, col2 = st.columns(2)
     
-    st.markdown("### Probability Distribution")
-    st.bar_chart(df)
+    with col1:
+        with st.container(border=True):
+            st.markdown("#### 🔹 V1 Baseline (Linear + Mean Pooling)")
+            st.metric(label="Predicted CSAT", value=pred_v1)
+            st.metric(label="Confidence", value=f"{conf_v1:.2f}%")
+            st.caption(f"⚡ Latency: {t_v1:.2f}ms on Apple Silicon MPS")
+            
+    with col2:
+        with st.container(border=True):
+            st.markdown("#### 🚀 V2 Upgraded (MLP ResBlock + [CLS] Token)")
+            st.metric(label="Predicted CSAT", value=pred_v2)
+            st.metric(label="Confidence", value=f"{conf_v2:.2f}%", delta=f"{conf_v2 - conf_v1:+.2f}% vs V1")
+            st.caption(f"⚡ Latency: {t_v2:.2f}ms on Apple Silicon MPS")
+            
+    st.markdown("### 📊 Probability Distribution Comparison")
+    df_compare = pd.DataFrame({
+        "V1 Baseline (%)": [p.item() * 100 for p in probs_v1],
+        "V2 Upgraded (%)": [p.item() * 100 for p in probs_v2],
+        "Category": classes
+    }).set_index("Category")
+    
+    st.bar_chart(df_compare)
+    
+    # -----------------
+    # 6. DEEP DEBUG DIAGNOSTICS & TELEMETRY
+    # -----------------
+    with st.expander("🔬 Deep Multimodal Debug & Diagnostics", expanded=True):
+        st.markdown("#### 1. Prediction Delta Table")
+        df_deltas = pd.DataFrame({
+            "CSAT Category": classes,
+            "V1 Baseline (%)": [f"{p.item() * 100:.2f}%" for p in probs_v1],
+            "V2 Upgraded (%)": [f"{p.item() * 100:.2f}%" for p in probs_v2],
+            "Delta (V2 - V1)": [f"{(p2.item() - p1.item()) * 100:+.2f}%" for p1, p2 in zip(probs_v1, probs_v2)]
+        })
+        st.table(df_deltas)
+        
+        st.markdown("#### 2. Raw Tensor Logits & Geometry")
+        m_col1, m_col2, m_col3 = st.columns(3)
+        with m_col1:
+            st.write("**V1 Raw Logits:**", [round(x, 4) for x in logits_v1[0].tolist()])
+            st.write("**Audio Tensor Shape:**", tuple(audio_tensor.shape))
+        with m_col2:
+            st.write("**V2 Raw Logits:**", [round(x, 4) for x in logits_v2[0].tolist()])
+            st.write("**Text Tensor Shape:**", tuple(chunked_text_tensor.shape))
+        with m_col3:
+            st.write("**Hardware Backend:**", str(device))
+            st.write("**Model Consensus:**", "✅ Agreement" if pred_v1 == pred_v2 else "⚠️ Divergence")
+            
+        st.markdown("#### 3. Segment Embedding Norm Breakdown")
+        if segment_details:
+            st.dataframe(pd.DataFrame(segment_details), use_container_width=True)
+
+

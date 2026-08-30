@@ -30,19 +30,30 @@ ENGINEER_ACCENTS = ["Standard American", "British", "Neutral Asian"]
 new_dialogues = []
 
 # To ensure perfectly balanced classes (125 each)
+CANONICAL_MAP = {
+    "urgent_follow_up": "very_unsatisfied",
+    "at_risk_dissatisfied": "unsatisfied",
+    "standard_resolved": "satisfied",
+    "promoter_delighted": "very_satisfied",
+    "very_unsatisfied": "very_unsatisfied",
+    "unsatisfied": "unsatisfied",
+    "satisfied": "satisfied",
+    "very_satisfied": "very_satisfied"
+}
+
 class_counts = {
-    "urgent_follow_up": sum(1 for d in existing_dialogues if d["action_label"] == "urgent_follow_up"),
-    "at_risk_dissatisfied": sum(1 for d in existing_dialogues if d["action_label"] == "at_risk_dissatisfied"),
-    "standard_resolved": sum(1 for d in existing_dialogues if d["action_label"] == "standard_resolved"),
-    "promoter_delighted": sum(1 for d in existing_dialogues if d["action_label"] == "promoter_delighted"),
+    "very_unsatisfied": sum(1 for d in existing_dialogues if CANONICAL_MAP.get(d["action_label"]) == "very_unsatisfied"),
+    "unsatisfied": sum(1 for d in existing_dialogues if CANONICAL_MAP.get(d["action_label"]) == "unsatisfied"),
+    "satisfied": sum(1 for d in existing_dialogues if CANONICAL_MAP.get(d["action_label"]) == "satisfied"),
+    "very_satisfied": sum(1 for d in existing_dialogues if CANONICAL_MAP.get(d["action_label"]) == "very_satisfied"),
 }
 
 for action_label in class_counts.keys():
     target_for_class = 125
-    needed_for_class = target_for_class - class_counts[action_label]
+    needed_for_class = max(0, target_for_class - class_counts[action_label])
     
     # Get all base dialogues for this class
-    base_samples = [d for d in existing_dialogues if d["action_label"] == action_label]
+    base_samples = [d for d in existing_dialogues if CANONICAL_MAP.get(d["action_label"]) == action_label]
     
     for i in range(needed_for_class):
         # Pick a random base sample to augment

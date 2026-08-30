@@ -1,15 +1,24 @@
 import os
 import sys
+import time
+import warnings
+warnings.filterwarnings("ignore")
+
 import torch
 import librosa
 import numpy as np
 import whisper
 import subprocess
+import transformers
+transformers.logging.set_verbosity_error()
+
+from transformers import AutoFeatureExtractor, WavLMModel
 from sentence_transformers import SentenceTransformer
 
 # Add src to path so we can import architecture
 sys.path.append(os.path.abspath("src"))
-from models.architecture import YShapedHybridCNN
+from models.architecture import DualTransformerClassifier, EnhancedDualTransformerClassifier
+
 
 def main():
     youtube_url = "https://youtu.be/gD7xQGXpSBg?si=Ok1BDZTkzom_K__6"
@@ -30,41 +39,60 @@ def main():
         ]
         try:
             subprocess.run(cmd, check=True)
-        except subprocess.CalledProcessError as e:
+        except subprocess.CalledProcessError:
             print("\n[ERROR] YouTube blocked the download (HTTP 429 / Bot Protection).")
-            print("Since you are a Google One user, you can bypass this by passing your browser cookies to yt-dlp.")
             print("Try running this manual command in your terminal first:")
-            print(f"yt-dlp --cookies-from-browser chrome -x --audio-format wav -o data/audio/tmp/youtube {youtube_url}")
-            print("(Replace 'chrome' with 'safari' or 'edge' if you use a different browser.)\n")
+            print(f"yt-dlp --cookies-from-browser chrome -x --audio-format wav -o data/audio/tmp/youtube {youtube_url}\n")
             sys.exit(1)
     
-    print("2. Loading Models...")
+    # Device Selection (Apple Silicon GPU MPS)
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("🚀 Utilizing Apple Silicon GPU Acceleration (MPS)")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+        print("🚀 Utilizing CUDA GPU Acceleration")
+    else:
+        device = torch.device("cpu")
+        print("Utilizing CPU")
+
+    print("2. Loading Feature Extractors (Whisper + WavLM + MPNet)...")
     whisper_model = whisper.load_model("small.en")
     text_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = YShapedHybridCNN(num_classes=4, text_dim=768).to(device)
+    wavlm_processor = AutoFeatureExtractor.from_pretrained("microsoft/wavlm-base-plus")
+    wavlm_model = WavLMModel.from_pretrained("microsoft/wavlm-base-plus").to(device).eval()
     
-    weights_path = "models/hybrid_cnn_weights.pt"
-    if not os.path.exists(weights_path):
-        raise FileNotFoundError(f"Model weights not found at {weights_path}. Please train the model first.")
-    model.load_state_dict(torch.load(weights_path, map_location=device))
-    model.eval()
+    # Load Both Models
+    print("   • Loading V1 Baseline (Linear Projections + Mean Pooling)...")
+    model_v1 = DualTransformerClassifier(num_classes=4, audio_dim=768, text_dim=768).to(device)
+    v1_path = "models/dual_transformer_v1_weights.pt" if os.path.exists("models/dual_transformer_v1_weights.pt") else "models/dual_transformer_weights.pt"
+    model_v1.load_state_dict(torch.load(v1_path, map_location=device))
+    model_v1.eval()
     
-    print("3. Transcribing with Whisper & Chunking...")
+    print("   • Loading V2 Upgraded (MLP ResBlock + [CLS] Token)...")
+    model_v2 = EnhancedDualTransformerClassifier(num_classes=4, audio_dim=768, text_dim=768).to(device)
+    v2_path = "models/dual_transformer_v2_weights.pt" if os.path.exists("models/dual_transformer_v2_weights.pt") else "models/dual_transformer_weights.pt"
+    model_v2.load_state_dict(torch.load(v2_path, map_location=device))
+    model_v2.eval()
+    
+    print("3. Transcribing with Whisper & Extracting Dynamic Chunks...")
     audio_data, sr = librosa.load(tmp_audio, sr=16000)
+    audio_duration = len(audio_data) / sr
     audio_fp32 = audio_data.astype(np.float32)
     transcription = whisper_model.transcribe(audio_fp32)
     
-    print("\n--- WHISPER TRANSCRIPT ---")
-    print(transcription["text"])
-    print("--------------------------\n")
+    print("\n" + "=" * 80)
+    print("📝 WHISPER TRANSCRIPT")
+    print("=" * 80)
+    print(transcription["text"].strip())
+    print("=" * 80 + "\n")
     
-    mel_specs = []
+    audio_embeds = []
     chunked_text_embeds = []
-    MAX_FRAMES = 312 # 10 seconds
+    chunk_debug_stats = []
     
-    for segment in transcription["segments"]:
+    for idx, segment in enumerate(transcription["segments"]):
         seg_text = segment["text"].strip()
         if not seg_text: continue
             
@@ -72,44 +100,109 @@ def main():
         end_sample = int(segment["end"] * sr)
         seg_audio = audio_fp32[start_sample:end_sample]
         
-        if len(seg_audio) == 0: continue
+        if len(seg_audio) < 160: continue
             
-        mel_spec = librosa.feature.melspectrogram(y=seg_audio, sr=sr, n_mels=128, hop_length=512)
-        log_mel_spec = librosa.power_to_db(mel_spec, ref=np.max)
-        mel_tensor = torch.tensor(log_mel_spec, dtype=torch.float32)
-        
-        if mel_tensor.shape[1] > MAX_FRAMES:
-            mel_tensor = mel_tensor[:, :MAX_FRAMES]
-        else:
-            pad_amount = MAX_FRAMES - mel_tensor.shape[1]
-            mel_tensor = torch.nn.functional.pad(mel_tensor, (0, pad_amount), value=0.0)
+        # WavLM Acoustic Prosody
+        inputs = wavlm_processor(seg_audio, sampling_rate=sr, return_tensors="pt")
+        input_values = inputs.input_values.to(device)
+        with torch.no_grad():
+            outputs = wavlm_model(input_values)
+            a_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0) # (768,)
             
-        t_emb = text_model.encode(seg_text, convert_to_tensor=True).cpu()
+        # Text Semantics
+        t_emb = text_model.encode(seg_text, convert_to_tensor=True).to(device)
         
-        mel_specs.append(mel_tensor.unsqueeze(0))
+        audio_embeds.append(a_emb)
         chunked_text_embeds.append(t_emb)
         
-    if not mel_specs:
+        chunk_debug_stats.append({
+            "chunk_idx": idx + 1,
+            "start": segment["start"],
+            "end": segment["end"],
+            "duration": segment["end"] - segment["start"],
+            "text": seg_text,
+            "audio_norm": a_emb.norm().item(),
+            "text_norm": t_emb.norm().item()
+        })
+        
+    if not audio_embeds:
         print("No valid segments found!")
         return
         
-    mel_specs_tensor = torch.stack(mel_specs).unsqueeze(0).to(device) # (1, S, 1, 128, 312)
-    chunked_text_tensor = torch.stack(chunked_text_embeds).unsqueeze(0).to(device) # (1, S, 768)
+    audio_tensor = torch.stack(audio_embeds).unsqueeze(0)       # (1, S, 768)
+    chunked_text_tensor = torch.stack(chunked_text_embeds).unsqueeze(0) # (1, S, 768)
+    num_chunks = audio_tensor.size(1)
     
-    print(f"Extracted {mel_specs_tensor.size(1)} chunks.")
+    print(f"📊 Extracted {num_chunks} dynamic dialogue chunks (Total Audio Duration: {audio_duration:.2f}s).")
     
-    print("4. Running Inference...")
+    # 4. Run Both Models Concurrently with Benchmarking
+    print("\n4. Running Side-by-Side Inference (V1 Baseline vs. V2 Upgraded)...")
+    
+    # V1 Inference
+    t0 = time.perf_counter()
     with torch.no_grad():
-        logits, _, _ = model(chunked_text_tensor, mel_specs_tensor)
-        probs = torch.nn.functional.softmax(logits, dim=1)[0]
-        
-    classes = ["urgent_follow_up", "at_risk_dissatisfied", "standard_resolved", "promoter_delighted"]
-    predicted_class = classes[torch.argmax(probs).item()]
+        logits_v1, _, _ = model_v1(chunked_text_tensor, audio_tensor)
+        probs_v1 = torch.nn.functional.softmax(logits_v1, dim=1)[0]
+    t_v1 = (time.perf_counter() - t0) * 1000
     
-    print("\n=== PREDICTION RESULTS ===")
-    for c, p in zip(classes, probs):
-        print(f"{c}: {p.item()*100:.2f}%")
-    print(f"\nFINAL PREDICTION: **{predicted_class}**")
+    # V2 Inference
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        logits_v2, _, _ = model_v2(chunked_text_tensor, audio_tensor)
+        probs_v2 = torch.nn.functional.softmax(logits_v2, dim=1)[0]
+    t_v2 = (time.perf_counter() - t0) * 1000
+    
+    classes = ["Very Unsatisfied", "Unsatisfied", "Satisfied", "Very Satisfied"]
+    pred_v1_idx = torch.argmax(probs_v1).item()
+    pred_v2_idx = torch.argmax(probs_v2).item()
+    
+    pred_v1 = classes[pred_v1_idx]
+    pred_v2 = classes[pred_v2_idx]
+    
+    # --- PRINT COMPARATIVE RESULTS TABLE ---
+    print("\n" + "=" * 80)
+    print("⚖️  SIDE-BY-SIDE MODEL PREDICTION COMPARISON")
+    print("=" * 80)
+    print(f"{'CSAT Category':<22} | {'V1 Baseline Prob':<18} | {'V2 Upgraded Prob':<18} | {'Delta (V2 - V1)'}")
+    print("-" * 80)
+    for c, p1, p2 in zip(classes, probs_v1, probs_v2):
+        val1 = p1.item() * 100
+        val2 = p2.item() * 100
+        delta = val2 - val1
+        sign = "+" if delta >= 0 else ""
+        print(f"{c:<22} | {val1:15.2f}% | {val2:15.2f}% | {sign}{delta:6.2f}%")
+        
+    print("-" * 80)
+    print(f"{'Predicted Category:':<22} | {pred_v1:<18} | {pred_v2:<18} | {'MATCH ✅' if pred_v1 == pred_v2 else 'DIFFERENT ⚠️'}")
+    print(f"{'Inference Latency:':<22} | {t_v1:15.2f}ms | {t_v2:15.2f}ms | {t_v2 - t_v1:+6.2f}ms")
+    print("=" * 80)
+    
+    # --- DEEP MULTIMODAL DEBUG INFO ---
+    print("\n" + "=" * 80)
+    print("🔬 DEEP MULTIMODAL DIAGNOSTICS & DEBUG TELEMETRY")
+    print("=" * 80)
+    print(f"• Hardware Device:               {device}")
+    print(f"• Total Conversation Chunks:     {num_chunks}")
+    print(f"• Audio Tensor Dimensions:       {tuple(audio_tensor.shape)}")
+    print(f"• Text Tensor Dimensions:        {tuple(chunked_text_tensor.shape)}")
+    print(f"• Mean Audio Embedding Norm:     {np.mean([s['audio_norm'] for s in chunk_debug_stats]):.4f}")
+    print(f"• Mean Text Embedding Norm:      {np.mean([s['text_norm'] for s in chunk_debug_stats]):.4f}")
+    print(f"• V1 Raw Output Logits:          {[round(x, 4) for x in logits_v1[0].tolist()]}")
+    print(f"• V2 Raw Output Logits:          {[round(x, 4) for x in logits_v2[0].tolist()]}")
+    print(f"• V1 Prediction Confidence:      {probs_v1[pred_v1_idx].item()*100:.2f}% ({pred_v1})")
+    print(f"• V2 Prediction Confidence:      {probs_v2[pred_v2_idx].item()*100:.2f}% ({pred_v2})")
+    print("=" * 80)
+    
+    print("\nTop 5 Dialogue Segments Sample Diagnostics:")
+    print(f"{'#':<3} | {'Start-End':<11} | {'AudioNorm':<9} | {'TextNorm':<9} | {'Segment Text'}")
+    print("-" * 80)
+    for s in chunk_debug_stats[:5]:
+        time_str = f"{s['start']:.1f}-{s['end']:.1f}s"
+        print(f"{s['chunk_idx']:<3} | {time_str:<11} | {s['audio_norm']:<9.2f} | {s['text_norm']:<9.2f} | {s['text'][:45]}")
+    if len(chunk_debug_stats) > 5:
+        print(f"... ({len(chunk_debug_stats) - 5} more chunks processed)")
+    print("=" * 80 + "\n")
 
 if __name__ == "__main__":
     main()
+

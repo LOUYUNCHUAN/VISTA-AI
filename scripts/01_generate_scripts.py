@@ -16,17 +16,17 @@ load_dotenv()
 # Configuration
 TOTAL_DIALOGUES = 500
 CLASSES = [
-    "urgent_follow_up",
-    "at_risk_dissatisfied",
-    "standard_resolved",
-    "promoter_delighted"
+    "very_unsatisfied",
+    "unsatisfied",
+    "satisfied",
+    "very_satisfied"
 ]
 # Split distribution to reach exactly 450 Train / 50 Test (90%/10%)
 DISTRIBUTION = {
-    "urgent_follow_up": {"train": 113, "test": 12},
-    "at_risk_dissatisfied": {"train": 112, "test": 13},
-    "standard_resolved": {"train": 113, "test": 12},
-    "promoter_delighted": {"train": 112, "test": 13},
+    "very_unsatisfied": {"train": 113, "test": 12},
+    "unsatisfied": {"train": 112, "test": 13},
+    "satisfied": {"train": 113, "test": 12},
+    "very_satisfied": {"train": 112, "test": 13},
 }
 
 DOMAINS = ["e-commerce", "telecom", "banking", "tech support"]
@@ -55,7 +55,7 @@ class Turn(BaseModel):
 class Dialogue(BaseModel):
     dialogue_id: str
     target_duration_sec: int
-    action_label: Literal["urgent_follow_up", "at_risk_dissatisfied", "standard_resolved", "promoter_delighted"]
+    action_label: Literal["very_unsatisfied", "unsatisfied", "satisfied", "very_satisfied"]
     fine_grained_emotion: str
     split: Literal["train", "test"]
     domain: Literal["e-commerce", "telecom", "banking", "tech support"]
